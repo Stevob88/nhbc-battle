@@ -236,10 +236,50 @@ function weightedSample(pool, boost, n){
 /* ---------- game layer ---------- */
 const LB_EMBED = /*LBJSON*/{"v":1,"entries":[]}/*LBJSON*/;
 const FIREBASE_URL = /*FBURL*/'https://nhbc-battle-default-rtdb.europe-west1.firebasedatabase.app'/*FBURL*/;  /* when set, the leaderboard lives in Firebase and works for anyone */
+const FIREBASE_API_KEY = /*FBKEY*/'AIzaSyDtWu9-bXzjHoQFvDb-oDnMsUT6-7hipyM'/*FBKEY*/;  /* Firebase Web API key — required for account login */
+const AUTH_EMAIL_DOMAIN = '@nhbc-battle.app'; /* usernames become fake emails under the hood so people don't need a real inbox */
 let LB = { entries: LB_EMBED.entries.slice() };
 
 function playerName(){ try{ return localStorage.getItem('nhbc-player')||''; }catch(e){ return ''; } }
 function setPlayerName(n){ try{ localStorage.setItem('nhbc-player', n); }catch(e){} }
+
+/* ---------- accounts (Firebase Auth REST) ---------- */
+function getAuthed(){ try{ return JSON.parse(localStorage.getItem('nhbc-auth')||'null'); }catch(e){ return null; } }
+function setAuthed(a){ try{ a ? localStorage.setItem('nhbc-auth', JSON.stringify(a)) : localStorage.removeItem('nhbc-auth'); }catch(e){} }
+function validUsername(u){ return /^[a-z0-9][a-z0-9._-]{2,19}$/i.test(u); }
+async function authCall(kind, username, password){
+  const email = username.trim().toLowerCase() + AUTH_EMAIL_DOMAIN;
+  const url = `https://identitytoolkit.googleapis.com/v1/accounts:${kind}?key=${FIREBASE_API_KEY}`;
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, password, returnSecureToken:true})});
+  const j = await r.json();
+  if(!r.ok) throw new Error((j && j.error && j.error.message) || 'auth-failed');
+  return j;
+}
+async function doSignUp(username, password){
+  const j = await authCall('signUp', username, password);
+  setAuthed({idToken:j.idToken, refreshToken:j.refreshToken, localId:j.localId, username:username.trim(), obtained:Date.now()});
+  setPlayerName(username.trim());
+}
+async function doSignIn(username, password){
+  const j = await authCall('signInWithPassword', username, password);
+  setAuthed({idToken:j.idToken, refreshToken:j.refreshToken, localId:j.localId, username:username.trim(), obtained:Date.now()});
+  setPlayerName(username.trim());
+}
+function doSignOut(){ setAuthed(null); }
+async function ensureFreshToken(){
+  const a = getAuthed();
+  if(!a) return null;
+  if(Date.now() - (a.obtained||0) < 50*60*1000) return a;
+  try{
+    const url = `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`;
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:`grant_type=refresh_token&refresh_token=${encodeURIComponent(a.refreshToken)}`});
+    const j = await r.json();
+    if(!r.ok) throw new Error('refresh-failed');
+    const na = {idToken:j.id_token, refreshToken:j.refresh_token, localId:j.user_id, username:a.username, obtained:Date.now()};
+    setAuthed(na);
+    return na;
+  }catch(e){ setAuthed(null); return null; }
+}
 
 function isoWeek(d){
   d = d || new Date();
@@ -275,7 +315,9 @@ function mergeEntries(list){
 async function fetchLB(){
   if(FIREBASE_URL){
     try{
-      const r = await fetch(FIREBASE_URL+'/scores.json', {cache:'no-store'});
+      const a = await ensureFreshToken();
+      if(!a) return [];
+      const r = await fetch(FIREBASE_URL+'/scores.json?auth='+encodeURIComponent(a.idToken), {cache:'no-store'});
       if(!r.ok) return [];
       const j = await r.json();
       return j ? Object.values(j).filter(e=>e && e.id) : [];
@@ -314,7 +356,9 @@ async function artifactNS(){
 async function postScore(entry, isRetry){
   if(FIREBASE_URL){
     try{
-      const r = await fetch(FIREBASE_URL+'/scores.json', {method:'POST', body: JSON.stringify(entry)});
+      const a = await ensureFreshToken();
+      if(!a) return 'local';
+      const r = await fetch(FIREBASE_URL+'/scores.json?auth='+encodeURIComponent(a.idToken), {method:'POST', body: JSON.stringify(entry)});
       if(r.ok){ LB.entries = mergeEntries(LB.entries.concat([entry])); setPending(null); return 'shared'; }
       if(!isRetry){ await new Promise(rs=>setTimeout(rs, 1200+Math.random()*1200)); return postScore(entry, true); }
       return 'local';
@@ -411,6 +455,62 @@ function mast(){ return `
   </header>`;
 }
 
+function authScreen(){
+  let mode = 'login';
+  const draw = ()=>{
+    app.innerHTML = mast() + `
+    <div class="namescreen">
+      <h2 style="font-size:22px;margin-bottom:4px">${mode==='login' ? 'Log in' : 'Create your account'}</h2>
+      <p style="color:var(--muted);font-size:15px">${mode==='login' ? 'Sign in to play the weekly battle and see the leaderboard.' : 'Pick a username and password — just for your workmates, no email needed.'}</p>
+      <input id="au" maxlength="20" placeholder="Username" autocomplete="username">
+      <input id="ap" type="password" placeholder="Password (6+ characters)" autocomplete="${mode==='login'?'current-password':'new-password'}" style="margin-top:10px">
+      <div id="aerr" class="savenote warn" style="display:none;margin-top:10px"></div>
+      <button class="btn btn-primary" id="ago" style="margin-top:14px">${mode==='login' ? 'Log in' : 'Create account'}</button>
+      <button class="btn" id="aswitch" style="margin-top:8px">${mode==='login' ? "New here? Create an account" : "Already have an account? Log in"}</button>
+    </div>`;
+    const u = document.getElementById('au'), p = document.getElementById('ap'), err = document.getElementById('aerr'), go = document.getElementById('ago');
+    u.focus();
+    const showErr = msg => { err.textContent = msg; err.style.display = 'block'; };
+    const submit = async ()=>{
+      const uname = u.value.trim(), pass = p.value;
+      err.style.display = 'none';
+      if(!validUsername(uname)){ showErr('Username should be 3-20 letters, numbers, . _ or -'); return; }
+      if(pass.length < 6){ showErr('Password needs to be at least 6 characters'); return; }
+      go.disabled = true; go.textContent = 'Please wait…';
+      try{
+        if(mode==='login') await doSignIn(uname, pass); else await doSignUp(uname, pass);
+        home();
+      }catch(e){
+        const m = (e.message||'').includes('EMAIL_EXISTS') ? 'That username is already taken' :
+          (e.message||'').includes('EMAIL_NOT_FOUND') || (e.message||'').includes('INVALID_PASSWORD') || (e.message||'').includes('INVALID_LOGIN_CREDENTIALS') ? 'Wrong username or password' :
+          (e.message||'').includes('WEAK_PASSWORD') ? 'Password needs to be at least 6 characters' :
+          (e.message||'').includes('TOO_MANY_ATTEMPTS') ? 'Too many attempts — wait a bit and try again' :
+          !FIREBASE_API_KEY ? 'Login isn\'t set up yet — ask the site owner to finish setup' :
+          'Something went wrong — check your details and try again';
+        showErr(m);
+        go.disabled = false; go.textContent = mode==='login' ? 'Log in' : 'Create account';
+      }
+    };
+    go.onclick = submit;
+    p.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+    document.getElementById('aswitch').onclick = ()=>{ mode = mode==='login' ? 'signup' : 'login'; draw(); };
+  };
+  draw();
+}
+
+function accountScreen(){
+  const a = getAuthed();
+  app.innerHTML = mast() + `
+  <button class="backlink" id="back">&larr; Back</button>
+  <div class="namescreen">
+    <h2 style="font-size:22px;margin-bottom:4px">Your account</h2>
+    <p style="color:var(--muted);font-size:15px">Signed in as <strong>${esc(a?a.username:'')}</strong> — that's the name your workmates see on the leaderboard.</p>
+    <button class="btn" id="logout" style="margin-top:14px">Log out</button>
+  </div>`;
+  document.getElementById('back').onclick = home;
+  document.getElementById('logout').onclick = ()=>{ doSignOut(); authScreen(); };
+}
+
 function home(){
   S=null;
   const hist = store.get();
@@ -455,7 +555,7 @@ function home(){
   Not produced by or affiliated with NHBC — always check the current Standards on site.</p>`;
   document.getElementById('m-test').onclick = buildSelect;
   document.getElementById('m-practice').onclick = setup;
-  document.getElementById('m-battle').onclick = ()=> playerName() ? startBattle() : nameScreen(startBattle);
+  document.getElementById('m-battle').onclick = ()=> playerName() ? startBattle() : authScreen();
   document.getElementById('m-board').onclick = boardView;
   document.getElementById('invite').onclick = async ()=>{
     const url = FIREBASE_URL ? location.href.split('#')[0] : 'https://claude.ai/code/artifact/c2441e8a-5ade-4384-888b-9ef33466c094';
@@ -468,7 +568,7 @@ function home(){
     setTimeout(()=>{ label.textContent = 'Invite your workmates — copy the link'; }, 3500);
   };
   const en = document.getElementById('editname');
-  if(en) en.onclick = ()=>nameScreen(home);
+  if(en) en.onclick = ()=>accountScreen();
   refreshLB().then(()=>{
     const top = leagueRows()[0];
     const el = document.getElementById('lb-preview');
@@ -865,7 +965,11 @@ function finish(){
   }
 }
 
-home();
+(async function boot(){
+  const a = await ensureFreshToken();
+  if(a && a.username){ setPlayerName(a.username); home(); }
+  else { authScreen(); }
+})();
 </script>
 
 </body>
