@@ -266,6 +266,38 @@ async function doSignIn(username, password){
   setPlayerName(username.trim());
 }
 function doSignOut(){ setAuthed(null); }
+
+/* ---------- sites (teams that share a private league table) ---------- */
+function getSite(){ try{ return JSON.parse(localStorage.getItem('nhbc-site')||'null'); }catch(e){ return null; } }
+function setSite(s){ try{ s ? localStorage.setItem('nhbc-site', JSON.stringify(s)) : localStorage.removeItem('nhbc-site'); }catch(e){} }
+function genSiteCode(){ const c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<5;i++) s+=c[Math.floor(Math.random()*c.length)]; return s; }
+async function createSite(name, type){
+  if(!FIREBASE_URL) throw new Error("Sites need the shared board to be online — ask the site owner to check setup.");
+  const a = await ensureFreshToken();
+  if(!a) throw new Error('You need to be logged in to create a site.');
+  for(let i=0;i<6;i++){
+    const code = genSiteCode();
+    const r = await fetch(FIREBASE_URL+'/sites/'+code+'.json?auth='+encodeURIComponent(a.idToken), {
+      method:'PUT', body: JSON.stringify({name:name.trim(), type, createdBy:a.username, createdAt:Date.now()})
+    });
+    if(r.ok){ const site = {id:code, name:name.trim(), type}; setSite(site); return site; }
+  }
+  throw new Error('Could not create a site right now — try again in a moment.');
+}
+async function joinSite(code){
+  code = (code||'').trim().toUpperCase();
+  if(!code) throw new Error('Enter a site code.');
+  if(!FIREBASE_URL) throw new Error("Sites need the shared board to be online — ask the site owner to check setup.");
+  const a = await ensureFreshToken();
+  if(!a) throw new Error('You need to be logged in to join a site.');
+  const r = await fetch(FIREBASE_URL+'/sites/'+code+'.json?auth='+encodeURIComponent(a.idToken), {cache:'no-store'});
+  if(!r.ok) throw new Error('Could not reach the site list — try again.');
+  const j = await r.json();
+  if(!j) throw new Error('No site found with that code — check it and try again.');
+  const site = {id:code, name:j.name, type:j.type};
+  setSite(site);
+  return site;
+}
 async function ensureFreshToken(){
   const a = getAuthed();
   if(!a) return null;
@@ -331,9 +363,9 @@ async function fetchLB(){
   }catch(e){ return []; }
 }
 /* League table: total points per player across every battle ever played */
-function leagueRows(){
+function leagueRows(entries){
   const m = {};
-  LB.entries.forEach(e=>{
+  (entries || LB.entries).forEach(e=>{
     if(!e || !e.name) return;
     const k = e.name.trim().toLowerCase();
     const r = m[k] || (m[k] = {name:e.name, pts:0, rounds:0, best:0});
@@ -500,21 +532,131 @@ function authScreen(){
 
 function accountScreen(){
   const a = getAuthed();
+  const site = getSite();
   app.innerHTML = mast() + `
   <button class="backlink" id="back">&larr; Back</button>
   <div class="namescreen">
     <h2 style="font-size:22px;margin-bottom:4px">Your account</h2>
     <p style="color:var(--muted);font-size:15px">Signed in as <strong>${esc(a?a.username:'')}</strong> — that's the name your workmates see on the leaderboard.</p>
-    <button class="btn" id="logout" style="margin-top:14px">Log out</button>
+    <p style="color:var(--muted);font-size:15px;margin-top:10px">${site ? `Site: <strong>${esc(site.name)}</strong> (${site.type==='timberframe'?'Timber frame':'Traditional'}) &middot; code <strong>${esc(site.id)}</strong>` : 'You\'re not on a site yet.'}</p>
+    <button class="btn" id="changesite" style="margin-top:14px">${site ? 'Change site' : 'Join or create a site'}</button>
+    <button class="btn" id="logout" style="margin-top:8px">Log out</button>
   </div>`;
   document.getElementById('back').onclick = home;
+  document.getElementById('changesite').onclick = ()=>siteScreen(home);
   document.getElementById('logout').onclick = ()=>{ doSignOut(); authScreen(); };
+}
+
+function siteScreen(then){
+  then = then || home;
+  let mode = 'choose';
+  const draw = ()=>{
+    if(mode==='choose'){
+      app.innerHTML = mast() + `
+      <button class="backlink" id="back">&larr; Back</button>
+      <h2 style="font-size:22px;margin-bottom:4px">Pick your site</h2>
+      <p style="color:var(--muted);font-size:15px;margin-bottom:14px">Battles and league tables run per site, so your team's scores stay together.</p>
+      <button class="card mode" id="s-create">
+        <span><h2>Create a site</h2><p>Start a new site and get a code to share with your team.</p></span>
+        <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <button class="card mode" id="s-join">
+        <span><h2>Join a site</h2><p>Got a code from a workmate? Join their site.</p></span>
+        <svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+      </button>`;
+      document.getElementById('back').onclick = home;
+      document.getElementById('s-create').onclick = ()=>{ mode='create'; draw(); };
+      document.getElementById('s-join').onclick = ()=>{ mode='join'; draw(); };
+    } else if(mode==='create'){
+      app.innerHTML = mast() + `
+      <button class="backlink" id="back">&larr; Back</button>
+      <div class="namescreen">
+        <h2 style="font-size:22px;margin-bottom:4px">Create a site</h2>
+        <p style="color:var(--muted);font-size:15px">Give your site a name and pick how it's built.</p>
+        <input id="sname" maxlength="30" placeholder="e.g. Riverside Phase 2" autocomplete="off">
+        <div class="filterrow" id="stype" style="margin-top:12px">
+          <button class="fbtn on" data-k="timberframe" type="button">Timber frame</button>
+          <button class="fbtn" data-k="traditional" type="button">Traditional</button>
+        </div>
+        <div id="serr" class="savenote warn" style="display:none;margin-top:10px"></div>
+        <button class="btn btn-primary" id="sgo" style="margin-top:14px">Create site</button>
+      </div>`;
+      document.getElementById('back').onclick = ()=>{ mode='choose'; draw(); };
+      const nm = document.getElementById('sname'), err = document.getElementById('serr'), go = document.getElementById('sgo');
+      let type = 'timberframe';
+      document.querySelectorAll('#stype [data-k]').forEach(b=>{
+        b.onclick = ()=>{ document.querySelectorAll('#stype [data-k]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); type = b.dataset.k; };
+      });
+      nm.focus();
+      const submit = async ()=>{
+        const name = nm.value.trim();
+        err.style.display = 'none';
+        if(!name){ err.textContent = 'Give your site a name'; err.style.display = 'block'; return; }
+        go.disabled = true; go.textContent = 'Creating…';
+        try{
+          const site = await createSite(name, type);
+          siteCreatedScreen(site, then);
+        }catch(e){
+          err.textContent = e.message || 'Something went wrong'; err.style.display = 'block';
+          go.disabled = false; go.textContent = 'Create site';
+        }
+      };
+      go.onclick = submit;
+      nm.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+    } else if(mode==='join'){
+      app.innerHTML = mast() + `
+      <button class="backlink" id="back">&larr; Back</button>
+      <div class="namescreen">
+        <h2 style="font-size:22px;margin-bottom:4px">Join a site</h2>
+        <p style="color:var(--muted);font-size:15px">Enter the code your workmate shared with you.</p>
+        <input id="scode" maxlength="6" placeholder="e.g. R7K2Q" autocomplete="off" style="text-transform:uppercase;letter-spacing:3px;text-align:center;font-weight:700">
+        <div id="jerr" class="savenote warn" style="display:none;margin-top:10px"></div>
+        <button class="btn btn-primary" id="jgo" style="margin-top:14px">Join site</button>
+      </div>`;
+      document.getElementById('back').onclick = ()=>{ mode='choose'; draw(); };
+      const cd = document.getElementById('scode'), err = document.getElementById('jerr'), go = document.getElementById('jgo');
+      cd.focus();
+      const submit = async ()=>{
+        err.style.display = 'none';
+        go.disabled = true; go.textContent = 'Joining…';
+        try{
+          await joinSite(cd.value);
+          then();
+        }catch(e){
+          err.textContent = e.message || 'Something went wrong'; err.style.display = 'block';
+          go.disabled = false; go.textContent = 'Join site';
+        }
+      };
+      go.onclick = submit;
+      cd.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+    }
+  };
+  draw();
+}
+
+function siteCreatedScreen(site, then){
+  app.innerHTML = mast() + `
+  <div class="namescreen">
+    <h2 style="font-size:22px;margin-bottom:4px">Site created</h2>
+    <p style="color:var(--muted);font-size:15px">Share this code with your team so they can join <strong>${esc(site.name)}</strong> (${site.type==='timberframe'?'Timber frame':'Traditional'}).</p>
+    <div style="font-size:34px;font-weight:800;letter-spacing:6px;text-align:center;padding:18px;border:1.5px solid var(--line);border-radius:10px;margin-top:10px">${esc(site.id)}</div>
+    <button class="btn" id="copycode" style="margin-top:12px">Copy code</button>
+    <button class="btn btn-primary" id="cont" style="margin-top:8px">Continue</button>
+  </div>`;
+  document.getElementById('copycode').onclick = async ()=>{
+    const btn = document.getElementById('copycode');
+    try{ await navigator.clipboard.writeText(site.id); btn.textContent = 'Copied!'; }
+    catch(e){ window.prompt('Copy this code:', site.id); }
+    setTimeout(()=>{ btn.textContent = 'Copy code'; }, 2000);
+  };
+  document.getElementById('cont').onclick = then;
 }
 
 function home(){
   S=null;
   const hist = store.get();
   const name = playerName();
+  const site = getSite();
   app.innerHTML = mast() + `
   <div class="statline">
     <span class="chip">${QUESTIONS.length} questions</span>
@@ -522,6 +664,7 @@ function home(){
     <span class="chip">Pass mark ${PASS}%</span>
   </div>
   ${name ? `<button class="namechip" id="editname">Playing as ${esc(name)} &#9998;</button>` : ''}
+  ${site ? `<button class="namechip" id="editsite">Site: ${esc(site.name)} (${site.type==='timberframe'?'Timber frame':'Traditional'}) &#9998;</button>` : ''}
   <button class="card mode battle" id="m-battle">
     <span class="glyph"><svg viewBox="0 0 24 24"><path d="M5 21l5.5-5.5M19 21l-5.5-5.5M4 4l7 7M20 4l-7 7M4 4v4M4 4h4M20 4v4M20 4h-4"/></svg></span>
     <span><h2>Weekly battle</h2><p>Same ${TEST_SIZE} questions for everyone this week. Points for speed. Winner takes the bragging rights.</p></span>
@@ -555,7 +698,7 @@ function home(){
   Not produced by or affiliated with NHBC — always check the current Standards on site.</p>`;
   document.getElementById('m-test').onclick = buildSelect;
   document.getElementById('m-practice').onclick = setup;
-  document.getElementById('m-battle').onclick = ()=> playerName() ? startBattle() : authScreen();
+  document.getElementById('m-battle').onclick = goBattle;
   document.getElementById('m-board').onclick = boardView;
   document.getElementById('invite').onclick = async ()=>{
     const url = FIREBASE_URL ? location.href.split('#')[0] : 'https://claude.ai/code/artifact/c2441e8a-5ade-4384-888b-9ef33466c094';
@@ -569,8 +712,11 @@ function home(){
   };
   const en = document.getElementById('editname');
   if(en) en.onclick = ()=>accountScreen();
+  const es = document.getElementById('editsite');
+  if(es) es.onclick = ()=>siteScreen(home);
   refreshLB().then(()=>{
-    const top = leagueRows()[0];
+    const scoped = site ? LB.entries.filter(e=>e.site===site.id) : LB.entries;
+    const top = leagueRows(scoped)[0];
     const el = document.getElementById('lb-preview');
     if(el && top) el.textContent = `${top.name} leads the league with ${top.pts.toLocaleString()} pts. Beat that.`;
   });
@@ -598,6 +744,12 @@ function nameScreen(then){
   inp.addEventListener('keydown', e=>{ if(e.key==='Enter') go(); });
 }
 
+function goBattle(){
+  if(!playerName()) return authScreen();
+  if(!getSite()) return siteScreen(startBattle);
+  startBattle();
+}
+
 function startBattle(){
   S = { mode:'battle', label:'Weekly battle '+isoWeek(), qs: weeklyQuestions(), i:0,
         answers:{}, revealed:{}, pts:0, streak:0, bestStreak:0, qStart:0, ptsEach:{} };
@@ -605,10 +757,16 @@ function startBattle(){
 }
 
 function boardView(){
+  const site = getSite();
+  let scope = site ? 'site' : 'all';
   app.innerHTML = mast() + `
   <button class="backlink" id="back">&larr; Back</button>
   <h2 style="font-size:22px;margin-bottom:10px">Leaderboard</h2>
-  <div class="filterrow" style="margin-top:0">
+  ${site ? `<div class="filterrow" style="margin-top:0">
+    <button class="fbtn on" data-s="site">${esc(site.name)}</button>
+    <button class="fbtn" data-s="all">Everyone</button>
+  </div>` : ''}
+  <div class="filterrow" ${site?'':'style="margin-top:0"'}>
     <button class="fbtn on" data-t="league">League</button>
     <button class="fbtn" data-t="week">This week</button>
     <button class="fbtn" data-t="best">Best round</button>
@@ -625,17 +783,19 @@ function boardView(){
       <span class="who">${esc(name)}<br><span class="sub">${sub}</span></span>
       <span class="pts">${(pts||0).toLocaleString()}</span></div>`;
   };
+  const scoped = ()=> (scope==='site' && site) ? LB.entries.filter(e=>e.site===site.id) : LB.entries;
   const render = t => {
     let html = '';
+    const entries = scoped();
     if(t==='league'){
-      const rows = leagueRows();
+      const rows = leagueRows(entries);
       html = rows.map((r,i)=>rowHTML(i, r.name,
         `${r.rounds} ${r.rounds===1?'round':'rounds'} &middot; best ${r.best.toLocaleString()}`,
         r.pts, r.name===me)).join('');
       if(!html) html = `<div class="lb-empty">No battles fought yet — play a weekly battle and start the league.</div>`;
     } else {
       const wk = isoWeek();
-      let rows = t==='week' ? LB.entries.filter(e=>e.week===wk) : LB.entries.slice();
+      let rows = t==='week' ? entries.filter(e=>e.week===wk) : entries.slice();
       rows.sort((a,b)=>b.pts-a.pts || (b.when||0)-(a.when||0));
       if(t==='best') rows = rows.slice(0,50);
       html = rows.map((e,i)=>rowHTML(i, e.name,
@@ -644,10 +804,13 @@ function boardView(){
     }
     document.getElementById('lb-list').innerHTML = html;
   };
-  document.querySelectorAll('.fbtn').forEach(b=>{
-    b.onclick = ()=>{ document.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('on')); b.classList.add('on'); render(b.dataset.t); };
+  document.querySelectorAll('[data-t]').forEach(b=>{
+    b.onclick = ()=>{ document.querySelectorAll('[data-t]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); render(b.dataset.t); };
   });
-  refreshLB().then(()=>render(document.querySelector('.fbtn.on').dataset.t));
+  document.querySelectorAll('[data-s]').forEach(b=>{
+    b.onclick = ()=>{ document.querySelectorAll('[data-s]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); scope = b.dataset.s; render(document.querySelector('[data-t].on').dataset.t); };
+  });
+  refreshLB().then(()=>render(document.querySelector('[data-t].on').dataset.t));
 }
 
 function buildSelect(){
@@ -927,8 +1090,10 @@ function finish(){
   if(isBattle){
     if(pct>=PASS) confettiBurst();
     const nm = playerName()||'Anon';
+    const mySite = getSite();
     const entry = { id: nm.replace(/\W+/g,'')+'-'+Date.now()+'-'+Math.floor(Math.random()*1e6),
       name: nm, pts: S.pts, correct: right, n, week: isoWeek(),
+      site: mySite ? mySite.id : null, siteName: mySite ? mySite.name : null, siteType: mySite ? mySite.type : null,
       date: new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short'}), when: Date.now() };
     const note = document.getElementById('savenote');
     const renderMini = ()=>{
