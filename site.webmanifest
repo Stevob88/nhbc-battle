@@ -1,7 +1,7 @@
 {
-  "name": "NHBC Battle - Standards Trainer",
-  "short_name": "NHBC Battle",
-  "description": "Weekly NHBC Standards 2026 quiz battles for site staff.",
+  "name": "HBX Battle - Site Knowledge Trainer",
+  "short_name": "HBX Battle",
+  "description": "Weekly site knowledge quiz battles for site staff — built from NHBC Standards, Building Regs, manufacturer guidance and standard details.",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#EEF4F8",
