@@ -6,6 +6,9 @@
 <title>NHBC Battle - Standards Trainer</title>
 <meta name="description" content="Weekly NHBC Standards 2026 quiz battles for site staff.">
 <meta name="theme-color" content="#2E86C1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <link rel="icon" type="image/x-icon" href="favicon.ico">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
@@ -1138,6 +1141,21 @@ function finish(){
     });
   }
 }
+
+/* ---------- auto-update: keep everyone on the latest version without reinstalling ---------- */
+let SITE_TAG = null;
+async function checkForUpdate(){
+  try{
+    const r = await fetch(location.pathname + (location.pathname.includes('?')?'&':'?') + '_v=' + Date.now(), {cache:'no-store', method:'HEAD'});
+    const tag = r.headers.get('etag') || r.headers.get('last-modified');
+    if(!tag) return;
+    if(SITE_TAG === null){ SITE_TAG = tag; return; }
+    if(tag !== SITE_TAG && S === null){ location.reload(); }
+  }catch(e){ /* offline or blocked — just skip this check */ }
+}
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') checkForUpdate(); });
+setInterval(checkForUpdate, 5*60*1000);
+setTimeout(checkForUpdate, 4000);
 
 (async function boot(){
   const a = await ensureFreshToken();
